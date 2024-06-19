@@ -5,7 +5,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from scipy.stats import kurtosis, skew
 from IPython.display import display, HTML
-from ipywidgets import FileUpload, Output, Button, Label, Checkbox
+from ipywidgets import FileUpload, Output, Button, Label, Checkbox, VBox, HBox, IntProgress
 
 # Define optimized functions
 def extract_frames_imageio(video_path, output_dir, progress_output):
@@ -232,68 +232,6 @@ def detect_objects_yolo(frames, progress_output):
 
     progress_output.append_stdout("Object detection completed.\n")
     return object_detection_frames
-    progress_output.append_stdout("Detecting objects using YOLO...\n")
-    
-    weights_path = "yolov3.weights"
-    config_path = "yolov3.cfg"
-    names_path = "coco.names"
-    
-    if not os.path.exists(weights_path) or not os.path.exists(config_path) or not os.path.exists(names_path):
-        progress_output.append_stdout("Error: YOLO files are missing. Please ensure yolov3.weights, yolov3.cfg, and coco.names are in the correct directory.\n")
-        return frames
-    
-    net = cv2.dnn.readNet(weights_path, config_path)
-    layer_names = net.getLayerNames()
-    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
-    
-    classes = []
-    with open(names_path, "r") as f:
-        classes = [line.strip() for line in f.readlines()]
-    
-    object_detection_frames = []
-    
-    for frame in frames:
-        height, width, channels = frame.shape
-        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-        net.setInput(blob)
-        outs = net.forward(output_layers)
-        
-        class_ids = []
-        confidences = []
-        boxes = []
-        
-        for out in outs:
-            for detection in out:
-                scores = detection[5:]
-                class_id = np.argmax(scores)
-                confidence = scores[class_id]
-                if confidence > 0.5:
-                    center_x = int(detection[0] * width)
-                    center_y = int(detection[1] * height)
-                    w = int(detection[2] * width)
-                    h = int(detection[3] * height)
-                    x = int(center_x - w / 2)
-                    y = int(center_y - h / 2)
-                    
-                    boxes.append([x, y, w, h])
-                    confidences.append(float(confidence))
-                    class_ids.append(class_id)
-        
-        indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
-        
-        for i in range(len(boxes)):
-            if i in indexes:
-                x, y, w, h = boxes[i]
-                label = str(classes[class_ids[i]])
-                color = (0, 255, 0)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        
-        object_detection_frames.append(frame)
-    
-    progress_output.append_stdout("Object detection completed.\n")
-    return object_detection_frames
-
 
 def stabilize_video(frames, progress_output):
     progress_output.append_stdout("Stabilizing video...\n")
@@ -351,6 +289,51 @@ optical_flow_checkbox = Checkbox(description='Optical Flow Analysis')
 stabilization_checkbox = Checkbox(description='Video Stabilization')
 edge_detection_checkbox = Checkbox(description='Edge Detection')
 
+# Create progress bar
+progress_bar = IntProgress(value=0, min=0, max=100, description='Progress:', bar_style='info', style={'bar_color': 'gray'})
+progress_output = Output(layout={'border': '1px solid black', 'width': '100%', 'height': '300px'})
+
+# Apply greyscale CSS styling
+css = """
+<style>
+    .widget-label {
+        color: #333;
+    }
+    .widget-button {
+        background-color: #ccc;
+        border: none;
+        color: #333;
+        padding: 8px 16px;
+        font-size: 14px;
+        margin: 4px 2px;
+        cursor: pointer;
+        border-radius: 4px;
+        transition-duration: 0.4s;
+    }
+    .widget-button:hover {
+        background-color: #666;
+        color: white;
+    }
+    .widget-checkbox {
+        color: #333;
+    }
+    .widget-output {
+        background-color: #f9f9f9;
+        color: #333;
+        padding: 10px;
+        font-family: 'Courier New', Courier, monospace;
+    }
+    .progress-bar-container {
+        display: flex;
+        align-items: center;
+    }
+    .progress-bar-container > * {
+        margin-right: 10px;
+    }
+</style>
+"""
+display(HTML(css))
+
 def on_upload_change(change):
     progress_output.clear_output()
     global video_path
@@ -361,47 +344,56 @@ def on_upload_change(change):
         progress_output.append_stdout(f"File uploaded: {filename}\n")
     process_button.disabled = False
 
+def update_progress(progress, total, description):
+    progress_bar.value = int((progress / total) * 100)
+    progress_bar.description = description
+
 def on_process_button_clicked(b):
     with progress_output:
         output_dir = '/mnt/data/frames'
         output_video_path = os.path.join('/mnt/data', 'annotated_video.mp4')
         
         # Execute steps
+        update_progress(0, 10, 'Extracting frames')
         frame_files = extract_frames_imageio(video_path, output_dir, progress_output)
+        update_progress(1, 10, 'Loading frames')
         frames = load_frames(frame_files, progress_output)
         
         if stabilization_checkbox.value:
+            update_progress(2, 10, 'Stabilizing video')
             frames = stabilize_video(frames, progress_output)
         
+        update_progress(3, 10, 'Converting to 3D tensor')
         tensor_3d = frames_to_3d_tensor(frames, progress_output)
+        update_progress(4, 10, 'Flattening 3D tensor')
         vectors = flatten_3d_tensor(tensor_3d, progress_output)
         
-        # Process vectors and get notes
+        update_progress(5, 10, 'Processing vectors')
         notes = process_vectors(vectors, progress_output)
         
-        # Additional processing based on user selection
         if motion_checkbox.value:
+            update_progress(6, 10, 'Detecting motion')
             frames = detect_motion(frames, progress_output)
         if optical_flow_checkbox.value:
+            update_progress(7, 10, 'Computing optical flow')
             frames = compute_optical_flow(frames, progress_output)
-        if object_detection_checkbox.value:
-            frames = detect_objects_yolo(frames, progress_output)
         if edge_detection_checkbox.value:
+            update_progress(8, 10, 'Detecting edges')
             frames = detect_edges(frames, progress_output)
         
-        # Get fps of the original video
         reader = imageio.get_reader(video_path)
         fps = reader.get_meta_data()['fps']
         reader.close()
-
-        # Reconstruct video with annotations
+        
+        update_progress(9, 10, 'Reconstructing video')
         reconstruct_video_with_annotations(frames, notes, output_video_path, fps, progress_output)
         
-        # Provide download link
+        update_progress(10, 10, 'Done')
         create_download_link(output_video_path, "Download Annotated Video")
 
 upload_widget.observe(on_upload_change, names='value')
 process_button.on_click(on_process_button_clicked)
 
 # Display GUI elements
-display(title, upload_widget, motion_checkbox, optical_flow_checkbox, object_detection_checkbox, stabilization_checkbox, edge_detection_checkbox, process_button, progress_output)
+display(VBox([title, upload_widget, HBox([motion_checkbox, optical_flow_checkbox, stabilization_checkbox, edge_detection_checkbox]), process_button, progress_bar, progress_output]))
+
