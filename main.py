@@ -1,14 +1,13 @@
 import os
 import imageio
-import numpy as np
 import cv2
-import pandas as pd
-from scipy.stats import kurtosis, skew
-from ipywidgets import FileUpload, Output, VBox, Label, Button
-from IPython.display import display, HTML
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+from scipy.stats import kurtosis, skew
+from IPython.display import display, HTML
+from ipywidgets import FileUpload, Output, Button, Label
 
-# Define functions
+# Define optimized functions
 def extract_frames_imageio(video_path, output_dir, progress_output):
     progress_output.append_stdout("Extracting frames...\n")
     if not os.path.exists(output_dir):
@@ -16,17 +15,23 @@ def extract_frames_imageio(video_path, output_dir, progress_output):
     
     reader = imageio.get_reader(video_path)
     frame_files = []
-    for i, frame in enumerate(reader):
+
+    def save_frame(i, frame):
         frame_path = os.path.join(output_dir, f'frame_{i:04d}.png')
         imageio.imwrite(frame_path, frame)
-        frame_files.append(frame_path)
+        return frame_path
+
+    with ThreadPoolExecutor() as executor:
+        frame_files = list(executor.map(save_frame, range(len(reader)), reader))
+
     reader.close()
     progress_output.append_stdout("Frames extracted.\n")
     return frame_files
 
 def load_frames(frame_files, progress_output):
     progress_output.append_stdout("Loading frames...\n")
-    frames = [cv2.imread(frame_file) for frame_file in frame_files]
+    with ThreadPoolExecutor() as executor:
+        frames = list(executor.map(cv2.imread, frame_files))
     progress_output.append_stdout("Frames loaded.\n")
     return frames
 
@@ -147,5 +152,6 @@ def on_process_button_clicked(b):
 upload_widget.observe(on_upload_change, names='value')
 process_button.on_click(on_process_button_clicked)
 
-# Display the GUI
-display(VBox([title, upload_widget, process_button, progress_output]))
+# Display GUI elements
+display(title, upload_widget, progress_output, process_button)
+
