@@ -5,7 +5,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from scipy.stats import kurtosis, skew
 from IPython.display import display, HTML
-from ipywidgets import FileUpload, Output, Button, Label
+from ipywidgets import FileUpload, Output, Button, Label, Checkbox
 
 # Define optimized functions
 def extract_frames_imageio(video_path, output_dir, progress_output):
@@ -108,11 +108,248 @@ def reconstruct_video_with_annotations(frames, notes, output_path, fps, progress
 def create_download_link(filepath, label):
     display(HTML(f'<a href="{filepath}" download>{label}</a>'))
 
+# Additional Functions
+
+def detect_motion(frames, progress_output):
+    progress_output.append_stdout("Detecting motion...\n")
+    motion_frames = []
+    prev_frame = None
+    
+    for frame in frames:
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_frame = cv2.GaussianBlur(gray_frame, (21, 21), 0)
+        
+        if prev_frame is None:
+            prev_frame = gray_frame
+            continue
+        
+        frame_delta = cv2.absdiff(prev_frame, gray_frame)
+        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+        thresh = cv2.dilate(thresh, None, iterations=2)
+        
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            if cv2.contourArea(contour) < 500:
+                continue
+            (x, y, w, h) = cv2.boundingRect(contour)
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        
+        motion_frames.append(frame)
+        prev_frame = gray_frame
+    
+    progress_output.append_stdout("Motion detection completed.\n")
+    return motion_frames
+
+def compute_optical_flow(frames, progress_output):
+    progress_output.append_stdout("Computing optical flow...\n")
+    optical_flow_frames = []
+    
+    prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    
+    for frame in frames[1:]:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        
+        hsv = np.zeros_like(frame)
+        hsv[..., 1] = 255
+        
+        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        hsv[..., 0] = ang * 180 / np.pi / 2
+        hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+        
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        optical_flow_frames.append(bgr)
+        
+        prev_gray = gray
+    
+    progress_output.append_stdout("Optical flow computation completed.\n")
+    return optical_flow_frames
+
+def detect_objects_yolo(frames, progress_output):
+    progress_output.append_stdout("Detecting objects using YOLO...\n")
+    
+    weights_path = "yolov3.weights"
+    config_path = "yolov3.cfg"
+    names_path = "coco.names"
+
+    if not os.path.exists(weights_path) or not os.path.exists(config_path) or not os.path.exists(names_path):
+        progress_output.append_stdout("Error: YOLO files are missing. Please ensure yolov3.weights, yolov3.cfg, and coco.names are in the correct directory.\n")
+        return frames
+    
+    try:
+        net = cv2.dnn.readNet(weights_path, config_path)
+        layer_names = net.getLayerNames()
+        output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+
+        classes = []
+        with open(names_path, "r") as f:
+            classes = [line.strip() for line in f.readlines()]
+
+        object_detection_frames = []
+
+        for frame in frames:
+            height, width, channels = frame.shape
+            blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+            net.setInput(blob)
+            outs = net.forward(output_layers)
+
+            class_ids = []
+            confidences = []
+            boxes = []
+
+            for out in outs:
+                for detection in out:
+                    scores = detection[5:]
+                    class_id = np.argmax(scores)
+                    confidence = scores[class_id]
+                    if confidence > 0.5:
+                        center_x = int(detection[0] * width)
+                        center_y = int(detection[1] * height)
+                        w = int(detection[2] * width)
+                        h = int(detection[3] * height)
+                        x = int(center_x - w / 2)
+                        y = int(center_y - h / 2)
+
+                        boxes.append([x, y, w, h])
+                        confidences.append(float(confidence))
+                        class_ids.append(class_id)
+
+            indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+
+            for i in range(len(boxes)):
+                if i in indexes:
+                    x, y, w, h = boxes[i]
+                    label = str(classes[class_ids[i]])
+                    color = (0, 255, 0)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+                    cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+            object_detection_frames.append(frame)
+    except Exception as e:
+        progress_output.append_stdout(f"Error during object detection: {str(e)}\n")
+        return frames
+
+    progress_output.append_stdout("Object detection completed.\n")
+    return object_detection_frames
+    progress_output.append_stdout("Detecting objects using YOLO...\n")
+    
+    weights_path = "yolov3.weights"
+    config_path = "yolov3.cfg"
+    names_path = "coco.names"
+    
+    if not os.path.exists(weights_path) or not os.path.exists(config_path) or not os.path.exists(names_path):
+        progress_output.append_stdout("Error: YOLO files are missing. Please ensure yolov3.weights, yolov3.cfg, and coco.names are in the correct directory.\n")
+        return frames
+    
+    net = cv2.dnn.readNet(weights_path, config_path)
+    layer_names = net.getLayerNames()
+    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+    
+    classes = []
+    with open(names_path, "r") as f:
+        classes = [line.strip() for line in f.readlines()]
+    
+    object_detection_frames = []
+    
+    for frame in frames:
+        height, width, channels = frame.shape
+        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+        net.setInput(blob)
+        outs = net.forward(output_layers)
+        
+        class_ids = []
+        confidences = []
+        boxes = []
+        
+        for out in outs:
+            for detection in out:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                if confidence > 0.5:
+                    center_x = int(detection[0] * width)
+                    center_y = int(detection[1] * height)
+                    w = int(detection[2] * width)
+                    h = int(detection[3] * height)
+                    x = int(center_x - w / 2)
+                    y = int(center_y - h / 2)
+                    
+                    boxes.append([x, y, w, h])
+                    confidences.append(float(confidence))
+                    class_ids.append(class_id)
+        
+        indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+        
+        for i in range(len(boxes)):
+            if i in indexes:
+                x, y, w, h = boxes[i]
+                label = str(classes[class_ids[i]])
+                color = (0, 255, 0)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        object_detection_frames.append(frame)
+    
+    progress_output.append_stdout("Object detection completed.\n")
+    return object_detection_frames
+
+
+def stabilize_video(frames, progress_output):
+    progress_output.append_stdout("Stabilizing video...\n")
+    stabilized_frames = []
+    prev_gray = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    transforms = []
+    
+    for i in range(1, len(frames)):
+        gray = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
+        prev_pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=200, qualityLevel=0.01, minDistance=30, blockSize=3)
+        curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, prev_pts, None)
+        
+        idx = np.where(status == 1)[0]
+        prev_pts = prev_pts[idx]
+        curr_pts = curr_pts[idx]
+        
+        m = cv2.estimateAffinePartial2D(prev_pts, curr_pts)[0]
+        dx = m[0, 2]
+        dy = m[1, 2]
+        da = np.arctan2(m[1, 0], m[0, 0])
+        transforms.append((dx, dy, da))
+        
+        prev_gray = gray
+    
+    for i in range(len(transforms)):
+        dx, dy, da = transforms[i]
+        m = np.array([[np.cos(da), -np.sin(da), dx], [np.sin(da), np.cos(da), dy]])
+        frame = cv2.warpAffine(frames[i], m, (frames[i].shape[1], frames[i].shape[0]))
+        stabilized_frames.append(frame)
+    
+    progress_output.append_stdout("Video stabilization completed.\n")
+    return stabilized_frames
+
+def detect_edges(frames, progress_output):
+    progress_output.append_stdout("Detecting edges...\n")
+    edge_frames = []
+    
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 100, 200)
+        edge_frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        edge_frames.append(edge_frame)
+    
+    progress_output.append_stdout("Edge detection completed.\n")
+    return edge_frames
+
 # Create GUI elements
 title = Label("Video Analysis and Annotation Tool")
 upload_widget = FileUpload(accept='video/*', multiple=False)
 progress_output = Output()
 process_button = Button(description="Process Video", disabled=True)
+
+motion_checkbox = Checkbox(description='Motion Detection')
+optical_flow_checkbox = Checkbox(description='Optical Flow Analysis')
+stabilization_checkbox = Checkbox(description='Video Stabilization')
+edge_detection_checkbox = Checkbox(description='Edge Detection')
 
 def on_upload_change(change):
     progress_output.clear_output()
@@ -132,12 +369,26 @@ def on_process_button_clicked(b):
         # Execute steps
         frame_files = extract_frames_imageio(video_path, output_dir, progress_output)
         frames = load_frames(frame_files, progress_output)
+        
+        if stabilization_checkbox.value:
+            frames = stabilize_video(frames, progress_output)
+        
         tensor_3d = frames_to_3d_tensor(frames, progress_output)
         vectors = flatten_3d_tensor(tensor_3d, progress_output)
         
         # Process vectors and get notes
         notes = process_vectors(vectors, progress_output)
-
+        
+        # Additional processing based on user selection
+        if motion_checkbox.value:
+            frames = detect_motion(frames, progress_output)
+        if optical_flow_checkbox.value:
+            frames = compute_optical_flow(frames, progress_output)
+        if object_detection_checkbox.value:
+            frames = detect_objects_yolo(frames, progress_output)
+        if edge_detection_checkbox.value:
+            frames = detect_edges(frames, progress_output)
+        
         # Get fps of the original video
         reader = imageio.get_reader(video_path)
         fps = reader.get_meta_data()['fps']
@@ -153,5 +404,4 @@ upload_widget.observe(on_upload_change, names='value')
 process_button.on_click(on_process_button_clicked)
 
 # Display GUI elements
-display(title, upload_widget, progress_output, process_button)
-
+display(title, upload_widget, motion_checkbox, optical_flow_checkbox, object_detection_checkbox, stabilization_checkbox, edge_detection_checkbox, process_button, progress_output)
