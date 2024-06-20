@@ -1,11 +1,10 @@
 import os
-import imageio
 import cv2
 import numpy as np
+import imageio
 from concurrent.futures import ThreadPoolExecutor
-from scipy.stats import kurtosis, skew
-from IPython.display import display, HTML
-from ipywidgets import FileUpload, Output, Button, Label, Checkbox, VBox, HBox, IntProgress
+from IPython.display import display, clear_output, HTML
+from ipywidgets import Output, Button, Label, FileUpload, VBox, Checkbox
 
 # Define optimized functions
 def extract_frames_imageio(video_path, output_dir, progress_output):
@@ -30,8 +29,12 @@ def extract_frames_imageio(video_path, output_dir, progress_output):
 
 def load_frames(frame_files, progress_output):
     progress_output.append_stdout("Loading frames...\n")
+    frames = []
     with ThreadPoolExecutor() as executor:
         frames = list(executor.map(cv2.imread, frame_files))
+    for frame_file, frame in zip(frame_files, frames):
+        if frame is None:
+            progress_output.append_stdout(f"Error loading frame: {frame_file}\n")
     progress_output.append_stdout("Frames loaded.\n")
     return frames
 
@@ -47,46 +50,56 @@ def flatten_3d_tensor(tensor, progress_output):
     progress_output.append_stdout("3D tensor flattened.\n")
     return vectors
 
-def process_vectors(vectors, progress_output):
-    progress_output.append_stdout("Processing vectors...\n")
-    with ThreadPoolExecutor() as executor:
-        futures = {
-            executor.submit(np.mean, vectors, axis=1): 'mean',
-            executor.submit(np.var, vectors, axis=1): 'variance',
-            executor.submit(np.max, vectors, axis=1): 'max',
-            executor.submit(np.min, vectors, axis=1): 'min',
-            executor.submit(np.median, vectors, axis=1): 'median',
-            executor.submit(np.std, vectors, axis=1): 'std_dev',
-            executor.submit(np.sum, vectors, axis=1): 'sum',
-            executor.submit(np.ptp, vectors, axis=1): 'range',
-            executor.submit(kurtosis, vectors, axis=1): 'kurtosis',
-            executor.submit(skew, vectors, axis=1): 'skewness',
-            executor.submit(np.percentile, vectors, 25, axis=1): 'q1',
-            executor.submit(np.percentile, vectors, 75, axis=1): 'q3',
-            executor.submit(np.sum, vectors**2, axis=1): 'energy'
-        }
-        results = {name: future.result() for future, name in futures.items()}
+def process_vectors(frames, progress_output):
+    progress_output.append_stdout("Processing video frames...\n")
     
-    results['iqr'] = results['q3'] - results['q1']
-    results['entropy'] = [-np.sum(p * np.log2(p)) for p in (frame/np.sum(frame) for frame in vectors)]
-    results['zero_crossing_rate'] = [((frame[:-1] * frame[1:]) < 0).sum() for frame in vectors]
+    mean_brightness = []
+    contrast = []
+    sharpness = []
+    motion_intensity = []
+    
+    for i, frame in enumerate(frames):
+        if frame is None:
+            progress_output.append_stdout(f"Error: Frame {i} is None.\n")
+            continue
 
-    progress_output.append_stdout("Vectors processed.\n")
-    return results
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Mean brightness
+        mean_brightness.append(np.mean(gray_frame))
+        
+        # Contrast (standard deviation of pixel intensities)
+        contrast.append(np.std(gray_frame))
+        
+        # Sharpness (using Laplacian variance)
+        laplacian = cv2.Laplacian(gray_frame, cv2.CV_64F)
+        sharpness.append(np.var(laplacian))
+        
+        # Motion intensity (using frame difference)
+        if i > 0:
+            prev_gray_frame = cv2.cvtColor(frames[i-1], cv2.COLOR_BGR2GRAY)
+            frame_diff = cv2.absdiff(prev_gray_frame, gray_frame)
+            motion_intensity.append(np.sum(frame_diff))
+        else:
+            motion_intensity.append(0)
+    
+    notes = {
+        'mean_brightness': np.array(mean_brightness),
+        'contrast': np.array(contrast),
+        'sharpness': np.array(sharpness),
+        'motion_intensity': np.array(motion_intensity)
+    }
+    
+    progress_output.append_stdout("Video frames processed.\n")
+    return notes
 
 def annotate_frame_with_notes(frame, notes, frame_index):
-    height, width, _ = frame.shape
     annotation = (
         f"Frame {frame_index}, "
-        f"Mean={notes['mean'][frame_index]:.2f}, "
-        f"Variance={notes['variance'][frame_index]:.2f}, "
-        f"Max={notes['max'][frame_index]:.2f}, Min={notes['min'][frame_index]:.2f}, "
-        f"Median={notes['median'][frame_index]:.2f}, StdDev={notes['std_dev'][frame_index]:.2f}, "
-        f"Sum={notes['sum'][frame_index]:.2f}, Range={notes['range'][frame_index]:.2f}, "
-        f"Kurtosis={notes['kurtosis'][frame_index]:.2f}, Skewness={notes['skewness'][frame_index]:.2f}, "
-        f"Q1={notes['q1'][frame_index]:.2f}, Q3={notes['q3'][frame_index]:.2f}, IQR={notes['iqr'][frame_index]:.2f}, "
-        f"Energy={notes['energy'][frame_index]:.2f}, Entropy={notes['entropy'][frame_index]:.2f}, "
-        f"ZeroCrossRate={notes['zero_crossing_rate'][frame_index]}"
+        f"Mean Brightness={notes['mean_brightness'][frame_index]:.2f}, "
+        f"Contrast={notes['contrast'][frame_index]:.2f}, "
+        f"Sharpness={notes['sharpness'][frame_index]:.2f}, "
+        f"Motion Intensity={notes['motion_intensity'][frame_index]:.2f}"
     )
     y0, dy = 30, 30  # Adjusted for 20-point font
     for i, line in enumerate(annotation.split(", ")):
@@ -110,12 +123,111 @@ def create_download_link(filepath, label):
 
 # Additional Functions
 
+def compute_color_histograms(frames, progress_output):
+    progress_output.append_stdout("Computing color histograms...\n")
+    histograms = []
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        # Compute the histogram for each color channel
+        hist_b = cv2.calcHist([frame], [0], None, [256], [0, 256])
+        hist_g = cv2.calcHist([frame], [1], None, [256], [0, 256])
+        hist_r = cv2.calcHist([frame], [2], None, [256], [0, 256])
+        histograms.append((hist_b, hist_g, hist_r))
+    
+    progress_output.append_stdout("Color histograms computed.\n")
+    return histograms
+
+def frame_differencing(frames, progress_output):
+    progress_output.append_stdout("Computing frame differences...\n")
+    diff_frames = []
+    prev_frame = None
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        if prev_frame is None:
+            prev_frame = gray_frame
+            continue
+        
+        frame_diff = cv2.absdiff(prev_frame, gray_frame)
+        diff_frames.append(frame_diff)
+        prev_frame = gray_frame
+    
+    progress_output.append_stdout("Frame differences computed.\n")
+    return diff_frames
+
+def blur_frames(frames, progress_output):
+    progress_output.append_stdout("Blurring frames...\n")
+    blurred_frames = []
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        blurred_frame = cv2.GaussianBlur(frame, (15, 15), 0)
+        blurred_frames.append(blurred_frame)
+    
+    progress_output.append_stdout("Frames blurred.\n")
+    return blurred_frames
+
+def crop_frames(frames, crop_region, progress_output):
+    progress_output.append_stdout("Cropping frames...\n")
+    cropped_frames = []
+    x, y, w, h = crop_region
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        cropped_frame = frame[y:y+h, x:x+w]
+        cropped_frames.append(cropped_frame)
+    
+    progress_output.append_stdout("Frames cropped.\n")
+    return cropped_frames
+
+def track_objects(frames, bbox, progress_output):
+    progress_output.append_stdout("Tracking objects...\n")
+    tracker = cv2.TrackerCSRT_create()
+    tracking_frames = []
+    
+    if len(frames) > 0 and frames[0] is not None:
+        tracker.init(frames[0], bbox)
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        success, box = tracker.update(frame)
+        if success:
+            x, y, w, h = [int(v) for v in box]
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        tracking_frames.append(frame)
+    
+    progress_output.append_stdout("Object tracking completed.\n")
+    return tracking_frames
+
+def adjust_brightness(frames, brightness_factor, progress_output):
+    progress_output.append_stdout("Adjusting frame brightness...\n")
+    adjusted_frames = []
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        adjusted_frame = cv2.convertScaleAbs(frame, alpha=brightness_factor, beta=0)
+        adjusted_frames.append(adjusted_frame)
+    
+    progress_output.append_stdout("Frame brightness adjusted.\n")
+    return adjusted_frames
+
 def detect_motion(frames, progress_output):
     progress_output.append_stdout("Detecting motion...\n")
     motion_frames = []
     prev_frame = None
     
     for frame in frames:
+        if frame is None:
+            continue
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray_frame = cv2.GaussianBlur(gray_frame, (21, 21), 0)
         
@@ -140,6 +252,25 @@ def detect_motion(frames, progress_output):
     
     progress_output.append_stdout("Motion detection completed.\n")
     return motion_frames
+
+def detect_faces(frames, progress_output):
+    progress_output.append_stdout("Detecting faces...\n")
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    face_frames = []
+    
+    for frame in frames:
+        if frame is None:
+            continue
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray_frame, 1.1, 4)
+        
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        
+        face_frames.append(frame)
+    
+    progress_output.append_stdout("Face detection completed.\n")
+    return face_frames
 
 def compute_optical_flow(frames, progress_output):
     progress_output.append_stdout("Computing optical flow...\n")
@@ -180,7 +311,7 @@ def detect_objects_yolo(frames, progress_output):
     try:
         net = cv2.dnn.readNet(weights_path, config_path)
         layer_names = net.getLayerNames()
-        output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+        output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
 
         classes = []
         with open(names_path, "r") as f:
@@ -188,7 +319,11 @@ def detect_objects_yolo(frames, progress_output):
 
         object_detection_frames = []
 
-        for frame in frames:
+        for frame_index, frame in enumerate(frames):
+            if frame is None:
+                continue
+            progress_output.append_stdout(f"Processing frame {frame_index + 1}/{len(frames)}\n")
+            
             height, width, channels = frame.shape
             blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
             net.setInput(blob)
@@ -226,6 +361,7 @@ def detect_objects_yolo(frames, progress_output):
                     cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             object_detection_frames.append(frame)
+
     except Exception as e:
         progress_output.append_stdout(f"Error during object detection: {str(e)}\n")
         return frames
@@ -270,6 +406,8 @@ def detect_edges(frames, progress_output):
     edge_frames = []
     
     for frame in frames:
+        if frame is None:
+            continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 100, 200)
         edge_frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
@@ -278,61 +416,72 @@ def detect_edges(frames, progress_output):
     progress_output.append_stdout("Edge detection completed.\n")
     return edge_frames
 
+def detect_motion_live(progress_output):
+    progress_output.append_stdout("Starting real-time motion detection...\n")
+    
+    cap = cv2.VideoCapture(0)  # Use 0 for webcam or provide a video file path
+    if not cap.isOpened():
+        progress_output.append_stdout("Error: Unable to open video source.\n")
+        return
+    
+    prev_frame = None
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_frame = cv2.GaussianBlur(gray_frame, (21, 21), 0)
+        
+        if prev_frame is None:
+            prev_frame = gray_frame
+            continue
+        
+        frame_delta = cv2.absdiff(prev_frame, gray_frame)
+        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+        thresh = cv2.dilate(thresh, None, iterations=2)
+        
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            if cv2.contourArea(contour) < 500:
+                continue
+            (x, y, w, h) = cv2.boundingRect(contour)
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        
+        _, buffer = cv2.imencode('.jpg', frame)
+        frame_display = buffer.tobytes()
+        
+        clear_output(wait=True)
+        display(HTML(f'<img src="data:image/jpeg;base64,{frame_display}" width="640" height="480">'))
+        
+        prev_frame = gray_frame
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    progress_output.append_stdout("Real-time motion detection ended.\n")
+
 # Create GUI elements
 title = Label("Video Analysis and Annotation Tool")
 upload_widget = FileUpload(accept='video/*', multiple=False)
 progress_output = Output()
 process_button = Button(description="Process Video", disabled=True)
+start_motion_detection_button = Button(description="Start Real-Time Motion Detection")
 
 motion_checkbox = Checkbox(description='Motion Detection')
+face_detection_checkbox = Checkbox(description='Face Detection')
 optical_flow_checkbox = Checkbox(description='Optical Flow Analysis')
 stabilization_checkbox = Checkbox(description='Video Stabilization')
 edge_detection_checkbox = Checkbox(description='Edge Detection')
-
-# Create progress bar
-progress_bar = IntProgress(value=0, min=0, max=100, description='Progress:', bar_style='info', style={'bar_color': 'gray'})
-progress_output = Output(layout={'border': '1px solid black', 'width': '100%', 'height': '300px'})
-
-# Apply greyscale CSS styling
-css = """
-<style>
-    .widget-label {
-        color: #333;
-    }
-    .widget-button {
-        background-color: #ccc;
-        border: none;
-        color: #333;
-        padding: 8px 16px;
-        font-size: 14px;
-        margin: 4px 2px;
-        cursor: pointer;
-        border-radius: 4px;
-        transition-duration: 0.4s;
-    }
-    .widget-button:hover {
-        background-color: #666;
-        color: white;
-    }
-    .widget-checkbox {
-        color: #333;
-    }
-    .widget-output {
-        background-color: #f9f9f9;
-        color: #333;
-        padding: 10px;
-        font-family: 'Courier New', Courier, monospace;
-    }
-    .progress-bar-container {
-        display: flex;
-        align-items: center;
-    }
-    .progress-bar-container > * {
-        margin-right: 10px;
-    }
-</style>
-"""
-display(HTML(css))
+color_histogram_checkbox = Checkbox(description='Color Histogram')
+frame_difference_checkbox = Checkbox(description='Frame Differencing')
+blur_frames_checkbox = Checkbox(description='Blur Frames')
+crop_frames_checkbox = Checkbox(description='Crop Frames')
+track_objects_checkbox = Checkbox(description='Track Objects')
+adjust_brightness_checkbox = Checkbox(description='Adjust Brightness')
 
 def on_upload_change(change):
     progress_output.clear_output()
@@ -344,56 +493,64 @@ def on_upload_change(change):
         progress_output.append_stdout(f"File uploaded: {filename}\n")
     process_button.disabled = False
 
-def update_progress(progress, total, description):
-    progress_bar.value = int((progress / total) * 100)
-    progress_bar.description = description
-
 def on_process_button_clicked(b):
     with progress_output:
         output_dir = '/mnt/data/frames'
         output_video_path = os.path.join('/mnt/data', 'annotated_video.mp4')
         
         # Execute steps
-        update_progress(0, 10, 'Extracting frames')
         frame_files = extract_frames_imageio(video_path, output_dir, progress_output)
-        update_progress(1, 10, 'Loading frames')
         frames = load_frames(frame_files, progress_output)
         
         if stabilization_checkbox.value:
-            update_progress(2, 10, 'Stabilizing video')
             frames = stabilize_video(frames, progress_output)
         
-        update_progress(3, 10, 'Converting to 3D tensor')
         tensor_3d = frames_to_3d_tensor(frames, progress_output)
-        update_progress(4, 10, 'Flattening 3D tensor')
         vectors = flatten_3d_tensor(tensor_3d, progress_output)
         
-        update_progress(5, 10, 'Processing vectors')
-        notes = process_vectors(vectors, progress_output)
+        # Process vectors and get notes
+        notes = process_vectors(frames, progress_output)
         
+        # Additional processing based on user selection
         if motion_checkbox.value:
-            update_progress(6, 10, 'Detecting motion')
             frames = detect_motion(frames, progress_output)
+        if face_detection_checkbox.value:
+            frames = detect_faces(frames, progress_output)
         if optical_flow_checkbox.value:
-            update_progress(7, 10, 'Computing optical flow')
             frames = compute_optical_flow(frames, progress_output)
         if edge_detection_checkbox.value:
-            update_progress(8, 10, 'Detecting edges')
             frames = detect_edges(frames, progress_output)
+        if color_histogram_checkbox.value:
+            histograms = compute_color_histograms(frames, progress_output)
+        if frame_difference_checkbox.value:
+            diff_frames = frame_differencing(frames, progress_output)
+        if blur_frames_checkbox.value:
+            frames = blur_frames(frames, progress_output)
+        if crop_frames_checkbox.value:
+            frames = crop_frames(frames, (50, 50, 200, 200), progress_output)  # Example crop region
+        if track_objects_checkbox.value:
+            frames = track_objects(frames, (50, 50, 100, 100), progress_output)  # Example bbox
+        if adjust_brightness_checkbox.value:
+            frames = adjust_brightness(frames, 1.2, progress_output)  # Example brightness factor
         
+        # Get fps of the original video
         reader = imageio.get_reader(video_path)
         fps = reader.get_meta_data()['fps']
         reader.close()
-        
-        update_progress(9, 10, 'Reconstructing video')
+
+        # Reconstruct video with annotations
         reconstruct_video_with_annotations(frames, notes, output_video_path, fps, progress_output)
         
-        update_progress(10, 10, 'Done')
+        # Provide download link
         create_download_link(output_video_path, "Download Annotated Video")
+
+def on_start_motion_detection_button_clicked(b):
+    with progress_output:
+        detect_motion_live(progress_output)
 
 upload_widget.observe(on_upload_change, names='value')
 process_button.on_click(on_process_button_clicked)
+start_motion_detection_button.on_click(on_start_motion_detection_button_clicked)
 
 # Display GUI elements
-display(VBox([title, upload_widget, HBox([motion_checkbox, optical_flow_checkbox, stabilization_checkbox, edge_detection_checkbox]), process_button, progress_bar, progress_output]))
-
+display(VBox([title, upload_widget, motion_checkbox, face_detection_checkbox, optical_flow_checkbox, stabilization_checkbox, edge_detection_checkbox, color_histogram_checkbox, frame_difference_checkbox, blur_frames_checkbox, crop_frames_checkbox, track_objects_checkbox, adjust_brightness_checkbox, process_button, start_motion_detection_button, progress_output]))
